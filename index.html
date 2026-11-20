@@ -1,0 +1,469 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+
+<title>Monitor GTFS RT Renfe</title>
+
+<style>
+
+body{
+    font-family: Arial, sans-serif;
+    margin:20px;
+    background:#f4f6f8;
+}
+
+h1{
+    color:#6B0130;
+}
+
+.resumen{
+    display:flex;
+    flex-wrap:wrap;
+    gap:15px;
+    margin-bottom:20px;
+}
+
+.tarjeta{
+    background:white;
+    padding:12px;
+    min-width:150px;
+    border-radius:8px;
+    box-shadow:0 2px 5px rgba(0,0,0,.15);
+}
+
+.actualizacion{
+    margin-bottom:15px;
+    font-weight:bold;
+}
+
+input,select{
+    padding:10px;
+}
+
+input{
+    width:500px;
+    max-width:100%;
+}
+
+.filtros{
+    display:flex;
+    gap:15px;
+    flex-wrap:wrap;
+    margin-bottom:20px;
+}
+
+table{
+    width:100%;
+    border-collapse:collapse;
+    background:white;
+}
+
+th{
+    background:#6B0130;
+    color:white;
+    padding:10px;
+    position:sticky;
+    top:0;
+}
+
+td{
+    padding:8px;
+    border-bottom:1px solid #ddd;
+}
+
+tr:hover{
+    background:#f5f5f5;
+}
+
+.ok{
+    color:green;
+    font-weight:bold;
+}
+
+.delay{
+    color:#d97706;
+    font-weight:bold;
+}
+
+.cancel{
+    color:red;
+    font-weight:bold;
+}
+
+.tripid,
+.blockid{
+    font-family:monospace;
+    font-size:12px;
+    color:#555;
+}
+
+</style>
+</head>
+
+<body>
+
+<h1>🚆 Monitor GTFS RT Renfe</h1>
+
+<div id="actualizacion" class="actualizacion">
+Cargando...
+</div>
+
+<div class="resumen">
+
+    <div class="tarjeta">
+        <b>Total</b><br>
+        <span id="total">0</span>
+    </div>
+
+    <div class="tarjeta">
+        <b>✅ En hora</b><br>
+        <span id="ok">0</span>
+    </div>
+
+    <div class="tarjeta">
+        <b>⏳ Retrasados</b><br>
+        <span id="retrasados">0</span>
+    </div>
+
+    <div class="tarjeta">
+        <b>❌ Suprimidos</b><br>
+        <span id="cancelados">0</span>
+    </div>
+
+</div>
+
+<div class="filtros">
+
+    <input
+        id="buscar"
+        placeholder="Buscar tren, Trip ID, Block ID, origen, destino o línea..."
+    >
+
+    <select id="filtroNucleo">
+        <option value="">Todos los núcleos</option>
+        <option value="Madrid">Madrid</option>
+        <option value="Barcelona">Barcelona</option>
+        <option value="Asturias">Asturias</option>
+        <option value="Sevilla">Sevilla</option>
+        <option value="Cádiz">Cádiz</option>
+        <option value="Málaga">Málaga</option>
+        <option value="Valencia">Valencia</option>
+        <option value="Murcia/Alicante">Murcia/Alicante</option>
+        <option value="Bilbao">Bilbao</option>
+        <option value="Donostia">Donostia</option>
+        <option value="Santander">Santander</option>
+        <option value="Zaragoza">Zaragoza</option>
+        <option value="León">León</option>
+        <option value="Ferrol">Ferrol</option>
+    </select>
+
+</div>
+
+<table>
+
+<thead>
+<tr>
+<th>Línea</th>
+<th>Núcleo</th>
+<th>Tren</th>
+<th>Trip ID</th>
+<th>Block ID</th>
+<th>Origen</th>
+<th>Destino</th>
+<th>Salida</th>
+<th>Llegada</th>
+<th>Estado</th>
+<th>Retraso</th>
+</tr>
+</thead>
+
+<tbody id="tabla"></tbody>
+
+</table>
+
+<script>
+
+let datos = [];
+let mapa = {};
+
+function convertirHora(h){
+
+    if(!h) return 999999;
+
+    const p = h.split(":");
+
+    return (
+        parseInt(p[0]) * 3600 +
+        parseInt(p[1]) * 60 +
+        parseInt(p[2])
+    );
+
+}
+
+async function cargar(){
+
+    try{
+
+        const [feed, tripMap] =
+        await Promise.all([
+
+            fetch("/api/trips?t=" + Date.now())
+            .then(r => r.json()),
+
+            fetch("trip_map.json?t=" + Date.now())
+            .then(r => r.json())
+
+        ]);
+
+        datos = feed.entity || [];
+        mapa = tripMap || {};
+
+        const fechaFeed =
+        feed.header?.timestamp
+        ? new Date(
+            Number(feed.header.timestamp) * 1000
+          ).toLocaleString()
+        : "Sin información";
+
+        document
+        .getElementById("actualizacion")
+        .innerHTML =
+        "Último feed GTFS: " +
+        fechaFeed;
+
+        pintar();
+
+    }
+    catch(error){
+
+        console.error(error);
+
+        document
+        .getElementById("actualizacion")
+        .innerHTML =
+        "❌ Error obteniendo datos";
+
+    }
+
+}
+
+function pintar(){
+
+    const filtro =
+    document
+    .getElementById("buscar")
+    .value
+    .toUpperCase();
+
+    const filtroNucleo =
+    document
+    .getElementById("filtroNucleo")
+    .value;
+
+    let total = 0;
+    let ok = 0;
+    let retrasados = 0;
+    let cancelados = 0;
+
+    let registros = [];
+
+    datos.forEach(entidad => {
+
+        if(!entidad.tripUpdate) return;
+
+        const trip =
+        entidad.tripUpdate.trip || {};
+
+        const tripId =
+        trip.tripId || "";
+
+        const info =
+        mapa[tripId] || {};
+
+        const tren =
+        info.tren || tripId;
+
+        const blockId =
+        info.blockId || "-";
+
+        const linea =
+        info.linea || "-";
+
+        const nucleo =
+        info.nucleo || "-";
+
+        const origen =
+        info.origen || "-";
+
+        const destino =
+        info.destino || "-";
+
+        const salida =
+        info.salida || "-";
+
+        const llegada =
+        info.llegada || "-";
+
+        const retraso =
+        entidad.tripUpdate.delay || 0;
+
+        let estado = "✅ En hora";
+        let clase = "ok";
+
+        if(
+            trip.scheduleRelationship ===
+            "CANCELED"
+        ){
+
+            estado = "❌ Suprimido";
+            clase = "cancel";
+            cancelados++;
+
+        }
+        else if(retraso > 0){
+
+            estado = "⏳ Retrasado";
+            clase = "delay";
+            retrasados++;
+
+        }
+        else{
+
+            ok++;
+
+        }
+
+        total++;
+
+        const textoBusqueda =
+        (
+            linea + " " +
+            nucleo + " " +
+            tren + " " +
+            tripId + " " +
+            blockId + " " +
+            origen + " " +
+            destino
+        ).toUpperCase();
+
+        if(
+            filtro &&
+            !textoBusqueda.includes(filtro)
+        ){
+            return;
+        }
+
+        if(
+            filtroNucleo &&
+            nucleo !== filtroNucleo
+        ){
+            return;
+        }
+
+        registros.push({
+
+            linea,
+            nucleo,
+            tren,
+            tripId,
+            blockId,
+            origen,
+            destino,
+            salida,
+            llegada,
+            estado,
+            clase,
+            retraso
+
+        });
+
+    });
+
+    registros.sort((a,b)=>{
+
+        return (
+            convertirHora(a.salida) -
+            convertirHora(b.salida)
+        );
+
+    });
+
+    let html = "";
+
+    registros.forEach(r => {
+
+        html += `
+        <tr>
+            <td>${r.linea}</td>
+            <td>${r.nucleo}</td>
+            <td>${r.tren}</td>
+            <td class="tripid">${r.tripId}</td>
+            <td class="blockid">${r.blockId}</td>
+            <td>${r.origen}</td>
+            <td>${r.destino}</td>
+            <td>${r.salida}</td>
+            <td>${r.llegada}</td>
+            <td class="${r.clase}">
+                ${r.estado}
+            </td>
+            <td>
+                ${
+                    r.retraso > 0
+                    ? Math.round(r.retraso / 60) + " min"
+                    : "-"
+                }
+            </td>
+        </tr>
+        `;
+
+    });
+
+    document
+    .getElementById("tabla")
+    .innerHTML = html;
+
+    document
+    .getElementById("total")
+    .innerText = total;
+
+    document
+    .getElementById("ok")
+    .innerText = ok;
+
+    document
+    .getElementById("retrasados")
+    .innerText = retrasados;
+
+    document
+    .getElementById("cancelados")
+    .innerText = cancelados;
+
+}
+
+document
+.getElementById("buscar")
+.addEventListener(
+    "input",
+    pintar
+);
+
+document
+.getElementById("filtroNucleo")
+.addEventListener(
+    "change",
+    pintar
+);
+
+cargar();
+
+setInterval(
+    cargar,
+    20000
+);
+
+</script>
+
+</body>
+</html>
